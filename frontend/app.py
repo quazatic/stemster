@@ -3,6 +3,7 @@ import subprocess
 import os
 import shutil
 import time
+import re
 from pathlib import Path
 import librosa
 import numpy as np
@@ -15,30 +16,23 @@ STEMS_DIR = BASE_DIR / "stems"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(STEMS_DIR, exist_ok=True)
 
-# === Streamlit App ===
+# === Streamlit App Config ===
 st.set_page_config(page_title="🎵 Stemster", layout="wide")
-st.title(":musical_note: Stemster Audio Separator")
+st.title("Stemster Audio Separator")
 st.markdown("Upload an audio file, analyze it, and extract clean stems using Demucs.")
 
-# === Layout Columns ===
-settings_col, upload_col = st.columns([1, 2])
+# === Sidebar: Configuration Panel ===
+st.sidebar.header("⚙️ Demucs Settings")
+model_choice = st.sidebar.selectbox("Model:", ["htdemucs", "demucs48_hq", "mdx_extra"])
+shifts = st.sidebar.slider("Shifts (quality vs speed):", 1, 10, 1)
+overlap = st.sidebar.slider("Overlap (blending):", 0.0, 1.0, 0.25, step=0.01)
+stem_options = st.sidebar.multiselect("Stems to keep:", ["vocals", "drums", "bass", "other"], default=["vocals", "drums", "bass", "other"])
 
-# === Sidebar: Project History ===
-st.sidebar.header(":open_file_folder: Past Stem Projects")
-all_dirs = sorted([d for d in STEMS_DIR.iterdir() if d.is_dir()], key=lambda x: x.stat().st_mtime, reverse=True)
-track_names = [d.name for d in all_dirs]
-selected_track = st.sidebar.selectbox("Select a track:", track_names if track_names else ["No tracks yet"])
+# === Main Upload Section ===
+main_col = st.container()
 
-# === Demucs Settings ===
-with settings_col:
-    st.subheader(":control_knobs: Demucs Settings")
-    model_choice = st.selectbox("Model:", ["htdemucs", "demucs48_hq", "mdx_extra"])
-    shifts = st.slider("Shifts (quality vs speed):", 1, 10, 1)
-    overlap = st.slider("Overlap (blending):", 0.0, 1.0, 0.25, step=0.01)
-
-# === File Upload ===
-with upload_col:
-    st.subheader(":inbox_tray: Upload Your Audio")
+with main_col:
+    st.subheader("📤 Upload Your Audio")
     uploaded_file = st.file_uploader("Choose a file", type=["mp3", "wav", "flac"])
 
     if uploaded_file:
@@ -46,6 +40,11 @@ with upload_col:
         with open(audio_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
         st.success(f"Uploaded: {uploaded_file.name}")
+
+        if st.button("🗑️ Delete Uploaded File"):
+            os.remove(audio_path)
+            st.success(f"Deleted {uploaded_file.name}")
+            st.rerun()
 
         # === Audio Analysis ===
         try:
@@ -65,72 +64,112 @@ with upload_col:
             st.warning(f"Tempo/key analysis failed: {e}")
 
         # === Generate Stems ===
-        if st.button(":microphone: Generate Stems"):
+        if st.button("🎛️ Generate Stems"):
             with st.spinner("Running Demucs... please wait."):
-                progress = st.progress(0)
-                for i in range(10):
-                    time.sleep(0.1)
-                    progress.progress((i + 1) * 10)
+                progress_bar = st.progress(0)
 
-                try:
-                    # Define dynamic output root based on selected model
-                    output_root = BASE_DIR / "backend" / "demucs" / "separated" / model_choice
+                command = [
+                    "/root/stemster/backend/demucs/demucs_env/bin/demucs",
+                    "-n", model_choice,
+                    "--shifts", str(shifts),
+                    "--overlap", str(overlap),
+                    "-d", "cpu",
+                    str(audio_path)
+                ]
 
-                    # Run Demucs
-                    result = subprocess.run([
-                        "/root/stemster/backend/demucs/demucs_env/bin/demucs",
-                        "-n", model_choice,
-                        "--shifts", str(shifts),
-                        "--overlap", str(overlap),
-                        "-d", "cpu",
-                        str(audio_path)
-                    ], check=True, cwd="/root/stemster/backend/demucs", capture_output=True, text=True)
+                step_map = {
+                    "Loading": 10,
+                    "Separating": 30,
+                    "Computing": 60,
+                    "Saving": 90,
+                    "Done": 100
+                }
 
-                    output_folders = sorted(output_root.glob("*"), key=lambda x: x.stat().st_mtime, reverse=True)
-                    if not output_folders:
-                        raise FileNotFoundError("No Demucs output found.")
+                process = subprocess.Popen(
+                    command,
+                    cwd="/root/stemster/backend/demucs",
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1
+                )
+
+                last_progress = 0
+                start_time = time.time()
+
+                for line in process.stdout:
+                    line = line.strip()
+                    for keyword, prog in step_map.items():
+                        if re.search(keyword, line, re.IGNORECASE) and prog > last_progress:
+                            progress_bar.progress(prog)
+                            last_progress = prog
+
+                process.wait()
+                elapsed = time.time() - start_time
+
+                output_root = BASE_DIR / "backend" / "demucs" / "separated" / model_choice
+                output_folders = sorted(output_root.glob("*"), key=lambda x: x.stat().st_mtime, reverse=True)
+
+                if process.returncode == 0 and output_folders:
                     demucs_output_dir = output_folders[0]
-
                     base_name = uploaded_file.name.rsplit(".", 1)[0]
                     target_stem_dir = STEMS_DIR / base_name
 
-                    # ✅ Overwrite if the folder already exists
                     if target_stem_dir.exists():
                         shutil.rmtree(target_stem_dir)
 
                     shutil.move(str(demucs_output_dir), str(target_stem_dir))
 
-                    st.success("✅ Stems Generated!")
+                    st.success(f"✅ Stems generated in **{round(elapsed, 2)} seconds**.")
 
-                    for stem_file in sorted(target_stem_dir.glob("*.wav")):
-                        st.audio(str(stem_file))
-                        with open(stem_file, "rb") as f:
-                            st.download_button(
-                                label=f"⬇️ Download {stem_file.name}",
-                                data=f,
-                                file_name=stem_file.name,
-                                mime="audio/wav",
-                                key=f"dl_new_{stem_file.name}"
-                            )
+                else:
+                    st.error("❌ Demucs failed or no output found.")
+                progress_bar.empty()
 
-                except subprocess.CalledProcessError as e:
-                    st.error(f"Demucs failed with error:\n{e.stderr}")
-                except Exception as e:
-                    st.error(f"Something went wrong while processing: {e}")
+# === Sidebar: Collapsible Track Manager ===
+st.sidebar.markdown("---")
+st.sidebar.header("📁 Track Manager")
 
-                progress.empty()
+uploaded_files = list(UPLOAD_DIR.glob("*"))
+stem_projects = [d for d in STEMS_DIR.glob("*") if d.is_dir()]
 
-# === History Preview ===
-if selected_track and selected_track != "No tracks yet":
-    st.subheader(f":headphones: Preview: {selected_track}")
-    stem_dir = STEMS_DIR / selected_track
-    for stem_file in sorted(stem_dir.glob("*.wav")):
-        st.audio(str(stem_file))
-        with open(stem_file, "rb") as f:
-            st.download_button(
-                label=f"⬇️ Download {stem_file.name}",
-                data=f,
-                file_name=stem_file.name,
-                mime="audio/wav",
-                key=f"dl_hist_{stem_file.name}"
-            )
+if uploaded_files:
+    st.sidebar.subheader("🎵 Uploaded Files")
+    for file in uploaded_files:
+        with st.sidebar.expander(f"🎧 {file.name}"):
+            st.audio(str(file))
+            st.download_button("⬇ Download", file.read_bytes(), file.name, key=f"download_{file.name}")
+            if st.button("🗑 Delete", key=f"del_upload_{file.name}"):
+                os.remove(file)
+                st.success(f"Deleted {file.name}")
+                st.rerun()
+
+if stem_projects:
+    st.sidebar.subheader("🎶 Stems Generated")
+    for track in stem_projects:
+        with st.sidebar.expander(f"🧱 {track.name}"):
+            for stem_file in sorted(track.glob("*.wav")):
+                st.audio(str(stem_file))
+                stem_label = stem_file.stem.lower()
+                icon_map = {
+                    "vocals": "🎤",
+                    "drums": "🥁",
+                    "bass": "🎸",
+                    "other": "🎛️"
+                }
+                label_icon = icon_map.get(stem_label, "🎵")
+                st.download_button(f"{label_icon} {stem_file.name}", stem_file.read_bytes(), file_name=stem_file.name, key=f"download_{track.name}_{stem_file.name}")
+
+            zip_path = Path(f"{track}.zip")
+            if not zip_path.exists():
+                shutil.make_archive(str(track), 'zip', track)
+
+            with open(zip_path, "rb") as f:
+                st.download_button("⬇ Download All (ZIP)", f, file_name=zip_path.name, key=f"zip_{track.name}")
+
+            if st.button("🗑 Delete Project", key=f"del_project_{track.name}"):
+                if zip_path.exists():
+                    zip_path.unlink()
+                shutil.rmtree(track)
+                st.success(f"Deleted {track.name}")
+                st.rerun()
