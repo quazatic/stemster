@@ -1,3 +1,5 @@
 uploads/
 stems/
 stems/
+backend/demucs/demucs_env/
+frontend/streamlit_env/
