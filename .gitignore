@@ -1,5 +1,31 @@
+# User uploads and generated content
 uploads/
 stems/
-stems/
+*.zip
+
+# Demucs env and data
 backend/demucs/demucs_env/
+backend/demucs/separated/
+
+# Streamlit frontend environment
 frontend/streamlit_env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.so
+
+# IDE files
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+
